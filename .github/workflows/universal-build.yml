@@ -1,3 +1,4 @@
+
 name: Universal Build
 
 on:
@@ -22,7 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+
     runs-on: ${{ matrix.os }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,6 +49,11 @@ jobs:
 
       - name: Install Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -62,6 +70,10 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
         shell: powershell
+
+      - name: Verify input project
+        run: |
+          python -c "import os; p='input/project.zip'; print('Project ZIP found:', os.path.exists(p)); exit(0 if os.path.exists(p) else 1)"
 
       - name: Run universal detector and build
         run: python scripts/build.py
