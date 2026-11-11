@@ -1,0 +1,76 @@
+
+name: Universal Compiler
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "universal-compiler-2-windows.zip"
+      - ".github/workflows/universal-build.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Extract compiler package
+        shell: pwsh
+        run: |
+          $zip = "$env:GITHUB_WORKSPACE/universal-compiler-2-windows.zip"
+          if (!(Test-Path $zip)) {
+            throw "ZIP não encontrado na raiz."
+          }
+
+          $destination = "$env:GITHUB_WORKSPACE/compiler-package"
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          Expand-Archive -LiteralPath $zip -DestinationPath $destination -Force
+
+          $root = "$destination/universal-compiler-2"
+
+          if (!(Test-Path "$root/scripts/build.py")) {
+            throw "scripts/build.py não encontrado dentro do ZIP."
+          }
+
+          "COMPILER_ROOT=$root" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Run universal compiler
+        shell: pwsh
+        run: |
+          python "$env:COMPILER_ROOT/scripts/build.py"
+          if ($LASTEXITCODE -ne 0) {
+            throw "O compilador terminou com erro."
+          }
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiler-artifacts
+          path: |
+            artifacts/**
+            compiler-package/universal-compiler-2/artifacts/**
+          if-no-files-found: ignore
