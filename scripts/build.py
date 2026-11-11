@@ -98,9 +98,9 @@ def build(base):
         if gradlew.exists():
             if os.name != "nt":
                 gradlew.chmod(0o755)
-            run([str(gradlew), "assembleRelease", "--no-daemon"], cwd=base)
+            run([str(gradlew), "assembleDebug", "--no-daemon"], cwd=base)
         else:
-            run(["gradle", "assembleRelease", "--no-daemon"], cwd=base)
+            run(["gradle", "assembleDebug", "--no-daemon"], cwd=base)
         return "Gradle"
 
     # Node / Web.
