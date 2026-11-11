@@ -1,31 +1,51 @@
-
-name: Universal Compiler
+name: Universal Build
 
 on:
-  workflow_dispatch:
   push:
     paths:
-      - "universal-compiler-2-windows.zip"
+      - "input/project.zip"
+      - "scripts/**"
       - ".github/workflows/universal-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: universal-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-    runs-on: windows-latest
-
+    name: Build on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
-      - name: Set up Java
+      - name: Set up Java for Android/Gradle
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential zip unzip
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -36,41 +56,25 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
 
-      - name: Extract compiler package
-        shell: pwsh
-        run: |
-          $zip = "$env:GITHUB_WORKSPACE/universal-compiler-2-windows.zip"
-          if (!(Test-Path $zip)) {
-            throw "ZIP não encontrado na raiz."
-          }
+      - name: Install CMake on Windows
+        if: runner.os == 'Windows'
+        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+        shell: powershell
 
-          $destination = "$env:GITHUB_WORKSPACE/compiler-package"
-          New-Item -ItemType Directory -Force -Path $destination | Out-Null
-          Expand-Archive -LiteralPath $zip -DestinationPath $destination -Force
+      - name: Run universal detector and build
+        run: python scripts/build.py
+        shell: bash
 
-          $root = "$destination/universal-compiler-2"
-
-          if (!(Test-Path "$root/scripts/build.py")) {
-            throw "scripts/build.py não encontrado dentro do ZIP."
-          }
-
-          "COMPILER_ROOT=$root" | Out-File $env:GITHUB_ENV -Append
-
-      - name: Run universal compiler
-        shell: pwsh
-        run: |
-          python "$env:COMPILER_ROOT/scripts/build.py"
-          if ($LASTEXITCODE -ne 0) {
-            throw "O compilador terminou com erro."
-          }
-
-      - name: Upload artifacts
+      - name: Upload build outputs and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: compiler-artifacts
+          name: universal-build-results-${{ matrix.os }}
           path: |
-            artifacts/**
-            compiler-package/universal-compiler-2/artifacts/**
-          if-no-files-found: ignore
+            artifacts/
+            work/project/**/build/outputs/**/*.apk
+            work/project/**/build/outputs/**/*.aab
+          if-no-files-found: warn
+          retention-days: 14
