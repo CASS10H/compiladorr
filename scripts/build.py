@@ -1,202 +1,152 @@
-import json
 import os
-import shutil
-import subprocess
 import sys
+import shutil
 import zipfile
+import subprocess
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path.cwd()
 ZIP_PATH = ROOT / "input" / "project.zip"
 WORK = ROOT / "work" / "project"
 OUT = ROOT / "artifacts"
-LOGS = OUT / "logs"
-
 OUT.mkdir(parents=True, exist_ok=True)
-LOGS.mkdir(parents=True, exist_ok=True)
-
-SKIP_DIRS = {".git", ".gradle", "node_modules", ".pub-cache", "__pycache__"}
-
-def log(*parts):
-    print(*parts, flush=True)
 
 def run(cmd, cwd=None):
-    cmd = [str(x) for x in cmd]
-    log("+", subprocess.list2cmdline(cmd))
-    # Windows batch files (.bat/.cmd) must be launched through cmd.exe.
-    if os.name == "nt" and cmd and Path(cmd[0]).suffix.lower() in {".bat", ".cmd"}:
-        cmd = ["cmd.exe", "/d", "/c", subprocess.list2cmdline(cmd)]
-    subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
+    print("+", " ".join(map(str, cmd)), flush=True)
+    subprocess.run(list(map(str, cmd)), cwd=cwd, check=True)
 
-def safe_extract():
-    if not ZIP_PATH.is_file():
-        raise RuntimeError("Arquivo ausente: coloque o projeto em input/project.zip")
-
+def extract_project():
+    if not ZIP_PATH.exists():
+        raise RuntimeError("Não encontrei input/project.zip. Envie o ZIP nesse caminho.")
     if WORK.exists():
         shutil.rmtree(WORK)
-    WORK.mkdir(parents=True, exist_ok=True)
-
-    with zipfile.ZipFile(ZIP_PATH) as archive:
-        root = WORK.resolve()
-        for item in archive.infolist():
-            # Reject absolute paths, traversal and Windows drive paths.
-            name = item.filename.replace("\\", "/")
-            target = (WORK / name).resolve()
-            if name.startswith("/") or (len(name) > 1 and name[1] == ":"):
-                raise RuntimeError(f"ZIP inseguro: caminho absoluto: {item.filename}")
-            if target != root and root not in target.parents:
+    WORK.mkdir(parents=True)
+    with zipfile.ZipFile(ZIP_PATH) as z:
+        for item in z.infolist():
+            target = (WORK / item.filename).resolve()
+            if WORK.resolve() not in target.parents and target != WORK.resolve():
                 raise RuntimeError(f"ZIP inseguro: caminho inválido: {item.filename}")
-        archive.extractall(WORK)
-
+        z.extractall(WORK)
+    # Remove um único diretório externo, caso o ZIP tenha sido criado assim.
     entries = list(WORK.iterdir())
     if len(entries) == 1 and entries[0].is_dir():
         nested = entries[0]
-        for child in list(nested.iterdir()):
-            shutil.move(str(child), str(WORK / child.name))
+        for p in list(nested.iterdir()):
+            shutil.move(str(p), str(WORK / p.name))
         nested.rmdir()
     return WORK
 
-def has_gradle(base):
-    return any(base.glob("*.gradle")) or any(base.glob("*.gradle.kts")) or \
-           (base / "gradlew").exists() or (base / "gradlew.bat").exists()
+def find_files(base, name):
+    return list(base.rglob(name))
 
-def npm_install(base):
-    if (base / "package-lock.json").exists():
-        run(["npm", "ci"], cwd=base)
-    elif (base / "yarn.lock").exists():
-        run(["corepack", "yarn", "install"], cwd=base)
-    elif (base / "pnpm-lock.yaml").exists():
-        run(["corepack", "pnpm", "install"], cwd=base)
-    else:
-        run(["npm", "install"], cwd=base)
-
-def build_flutter(base):
-    log("Projeto detectado: Flutter")
-    run(["flutter", "doctor", "-v"], cwd=base)
-    run(["flutter", "pub", "get"], cwd=base)
-    run(["flutter", "build", "apk", "--release"], cwd=base)
-    if (base / "web").is_dir():
-        run(["flutter", "build", "web", "--release"], cwd=base)
-    return "Flutter"
-
-def build_react_native(base):
-    log("Projeto detectado: React Native Android")
-    npm_install(base)
-    android = base / "android"
-    wrapper = android / ("gradlew.bat" if os.name == "nt" else "gradlew")
-    if not wrapper.is_file():
-        raise RuntimeError("Projeto React Native sem android/gradlew(.bat). Gere/adicone a pasta Android.")
-    run([wrapper, "assembleRelease", "--no-daemon"], cwd=android)
-    return "React Native Android"
-
-def build_gradle(base):
-    log("Projeto detectado: Gradle / Android / Java / Kotlin")
-    wrapper = base / ("gradlew.bat" if os.name == "nt" else "gradlew")
-    if wrapper.is_file():
-        if os.name != "nt":
-            wrapper.chmod(0o755)
-        run([wrapper, "assembleRelease", "--no-daemon"], cwd=base)
-        # Also try AAB; APK remains available if this task is not configured.
-        try:
-            run([wrapper, "bundleRelease", "--no-daemon"], cwd=base)
-        except subprocess.CalledProcessError:
-            log("Aviso: bundleRelease não está configurado; mantendo os resultados existentes.")
-    else:
-        run(["gradle", "assembleRelease", "--no-daemon"], cwd=base)
-    return "Gradle"
-
-def build_node(base):
-    log("Projeto detectado: Node.js / Web")
-    pkg = json.loads((base / "package.json").read_text(encoding="utf-8"))
-    npm_install(base)
-    scripts = pkg.get("scripts", {})
-    if "build" in scripts:
-        run(["npm", "run", "build"], cwd=base)
-    else:
-        log("Aviso: package.json não possui script build.")
-    return "Node/Web"
-
-def build_python(base):
-    log("Projeto detectado: Python")
-    run([sys.executable, "-m", "pip", "install", "--upgrade", "build"], cwd=base)
-    run([sys.executable, "-m", "build", "--wheel"], cwd=base)
-    return "Python"
-
-def build_cmake(base):
-    log("Projeto detectado: CMake")
-    run(["cmake", "-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Release"], cwd=base)
-    run(["cmake", "--build", "build", "--config", "Release", "--parallel"], cwd=base)
-    return "CMake"
-
-def build(base):
-    if (base / "pubspec.yaml").is_file() and (base / "lib").is_dir():
-        return build_flutter(base)
-
-    if (base / "package.json").is_file() and (base / "android").is_dir():
-        return build_react_native(base)
-
-    if has_gradle(base):
-        return build_gradle(base)
-
-    if (base / "package.json").is_file():
-        return build_node(base)
-
-    if (base / "pyproject.toml").is_file() or (base / "setup.py").is_file():
-        return build_python(base)
-
-    if (base / "CMakeLists.txt").is_file():
-        return build_cmake(base)
-
-    raise RuntimeError(
-        "Projeto não reconhecido. Suportados: Flutter, React Native Android, "
-        "Gradle/Android, Node/Web, Python e CMake."
-    )
-
-def collect_files(base):
-    copied = []
-    extensions = {".apk", ".aab", ".ipa", ".exe", ".msi", ".deb", ".rpm", ".whl"}
-    for path in base.rglob("*"):
-        if not path.is_file():
-            continue
-        if any(part in SKIP_DIRS for part in path.parts):
-            continue
-        if path.suffix.lower() in extensions:
-            dest = OUT / path.name
-            if dest.exists():
-                dest = OUT / f"{path.parent.name}-{path.name}"
-            shutil.copy2(path, dest)
-            copied.append(dest.name)
-
-    # Common web/package output directories, copied without dependency folders.
-    for dirname in ("dist", "web-build"):
-        for src in base.rglob(dirname):
-            if not src.is_dir() or any(part in SKIP_DIRS for part in src.parts):
+def copy_outputs(base):
+    copied = 0
+    patterns = [
+        "**/*.apk", "**/*.aab", "**/*.ipa", "**/*.exe", "**/*.msi",
+        "**/*.deb", "**/*.rpm", "**/*.whl", "**/*.zip"
+    ]
+    for pattern in patterns:
+        for src in base.glob(pattern):
+            if any(part in {".gradle", "node_modules", ".pub-cache"} for part in src.parts):
                 continue
-            dest = OUT / f"{src.parent.name or 'project'}-{dirname}"
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(src, dest, ignore=shutil.ignore_patterns(*SKIP_DIRS))
-            copied.append(dest.name)
+            if src.is_file():
+                dest = OUT / src.name
+                if dest.exists():
+                    dest = OUT / f"{src.parent.name}-{src.name}"
+                shutil.copy2(src, dest)
+                copied += 1
+    for dirname in ("dist", "build", "out", "web-build"):
+        for src in base.rglob(dirname):
+            if src.is_dir() and not any(p in {"node_modules", ".gradle"} for p in src.parts):
+                dest = OUT / f"{src.parent.name or 'project'}-{dirname}"
+                if dest.exists():
+                    shutil.rmtree(dest)
+                shutil.copytree(src, dest, ignore=shutil.ignore_patterns("node_modules", ".gradle", ".git"))
+                copied += 1
     return copied
 
-def main():
-    try:
-        project = safe_extract()
-        kind = build(project)
-        outputs = collect_files(project)
-        summary = [
-            f"Tipo detectado: {kind}",
-            f"Arquivos/pastas coletados: {len(outputs)}",
-            *outputs,
-        ]
-        (OUT / "build-summary.txt").write_text("\n".join(summary) + "\n", encoding="utf-8")
-        log("BUILD FINALIZADO:", kind, "| itens coletados:", len(outputs))
-        if not outputs:
-            log("AVISO: a compilação terminou, mas nenhum artefato conhecido foi encontrado.")
-    except Exception as exc:
-        (OUT / "build-error.txt").write_text(f"{type(exc).__name__}: {exc}\n", encoding="utf-8")
-        log(f"ERRO DE COMPILAÇÃO: {exc}")
-        raise
+def build(base):
+    # Flutter tem prioridade sobre detecção genérica de Dart.
+    if (base / "pubspec.yaml").exists() and (base / "lib").exists():
+        print("Projeto detectado: Flutter")
+        run(["flutter", "pub", "get"], cwd=base)
+        run(["flutter", "build", "apk", "--release"], cwd=base)
+        if (base / "web").exists():
+            run(["flutter", "build", "web", "--release"], cwd=base)
+        return "Flutter"
+
+    # Gradle Android/Java/Kotlin.
+    gradle_files = list(base.glob("settings.gradle*")) + list(base.glob("build.gradle*"))
+    gradlew = base / ("gradlew.bat" if os.name == "nt" else "gradlew")
+    android_dir = base / "android"
+    if (base / "package.json").exists() and android_dir.exists() and (android_dir / "gradlew").exists():
+        print("Projeto detectado: React Native Android")
+        pkg = __import__("json").loads((base / "package.json").read_text(encoding="utf-8"))
+        if (base / "package-lock.json").exists():
+            run(["npm", "ci"], cwd=base)
+        else:
+            run(["npm", "install"], cwd=base)
+        run(["npm", "run", "build"], cwd=base) if pkg.get("scripts", {}).get("build") else None
+        rn_gradlew = android_dir / ("gradlew.bat" if os.name == "nt" else "gradlew")
+        if os.name != "nt":
+            rn_gradlew.chmod(0o755)
+        run([str(rn_gradlew), "assembleRelease", "--no-daemon"], cwd=android_dir)
+        return "React Native Android"
+
+    if gradle_files or gradlew.exists():
+        print("Projeto detectado: Gradle/Android/Java/Kotlin")
+        if gradlew.exists():
+            if os.name != "nt":
+                gradlew.chmod(0o755)
+            run([str(gradlew), "assembleRelease", "--no-daemon"], cwd=base)
+        else:
+            run(["gradle", "assembleRelease", "--no-daemon"], cwd=base)
+        return "Gradle"
+
+    # Node / Web.
+    if (base / "package.json").exists():
+        print("Projeto detectado: Node.js/Web")
+        import json
+        pkg = json.loads((base / "package.json").read_text(encoding="utf-8"))
+        run(["npm", "ci"] if (base / "package-lock.json").exists() else ["npm", "install"], cwd=base)
+        if pkg.get("scripts", {}).get("build"):
+            run(["npm", "run", "build"], cwd=base)
+        else:
+            print("Aviso: package.json não possui script 'build'; dependências instaladas.")
+        return "Node/Web"
+
+    # Python.
+    if (base / "pyproject.toml").exists() or (base / "setup.py").exists():
+        print("Projeto detectado: Python")
+        run([sys.executable, "-m", "pip", "install", "--upgrade", "build"], cwd=base)
+        run([sys.executable, "-m", "build", "--wheel"], cwd=base)
+        return "Python"
+
+    # CMake native project.
+    if (base / "CMakeLists.txt").exists():
+        print("Projeto detectado: CMake (nativo)")
+        run(["cmake", "-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Release"], cwd=base)
+        run(["cmake", "--build", "build", "--config", "Release", "--parallel"], cwd=base)
+        return "CMake"
+
+    raise RuntimeError(
+        "Tipo de projeto não reconhecido. Esperava pubspec.yaml, settings.gradle/build.gradle, "
+        "package.json, pyproject.toml/setup.py ou CMakeLists.txt."
+    )
 
 if __name__ == "__main__":
-    main()
+    try:
+        project = extract_project()
+        kind = build(project)
+        count = copy_outputs(project)
+        (OUT / "build-summary.txt").write_text(
+            f"Tipo detectado: {kind}\nArquivos/pastas de saída copiados: {count}\n",
+            encoding="utf-8"
+        )
+        if count == 0:
+            print("AVISO: build terminou, mas nenhum artefato conhecido foi encontrado.")
+        print(f"BUILD FINALIZADO: {kind}; itens coletados: {count}")
+    except Exception as exc:
+        (OUT / "build-error.txt").write_text(str(exc), encoding="utf-8")
+        print(f"ERRO DE COMPILAÇÃO: {exc}", file=sys.stderr)
+        raise
